@@ -35,7 +35,7 @@ impl Signature {
     }
 }
 
-fn register_builtins<'src>(bindings: &mut HashMap<&'src str, Signature>) {
+fn register_builtins(bindings: &mut HashMap<&str, Signature>) {
     use Signature as S;
     use Type::*;
 
@@ -46,7 +46,7 @@ fn register_builtins<'src>(bindings: &mut HashMap<&'src str, Signature>) {
     add("*", S::new(vec![Int, Int], vec![Int]));
     add("/", S::new(vec![Int, Int], vec![Int]));
 
-    add("puti", S::new(vec![Int], vec![]));
+    add("exit", S::new(vec![Int], vec![]));
 
     add("true", S::new(vec![], vec![Bool]));
     add("false", S::new(vec![], vec![Bool]));
@@ -69,7 +69,7 @@ fn register_builtins<'src>(bindings: &mut HashMap<&'src str, Signature>) {
             vec![MultiVar(1)],
         ),
     );
-    add("?", S::new(vec![Bool, Var(0), Var(0)], vec![Var(0)]));
+    add("?", S::new(vec![Var(0), Var(0), Bool], vec![Var(0)]));
 }
 
 fn next<'src>(words: &[Word<'src>], pos: &mut usize) -> Option<Word<'src>> {
@@ -237,30 +237,33 @@ fn try_signature<'src>(
                 var_context,
                 multivar_context,
             )?;
+        } else if let Some(ty) = outputs.pop() {
+            unify(
+                word,
+                &sig,
+                &stack,
+                input,
+                &ty,
+                var_context,
+                multivar_context,
+            )?;
         } else {
-            if let Some(ty) = outputs.pop() {
-                unify(
-                    word,
-                    &sig,
-                    &stack,
-                    input,
-                    &ty,
-                    var_context,
-                    multivar_context,
-                )?;
-            } else {
-                inputs.push(input.clone());
-            }
+            inputs.push(input.clone());
         }
     }
 
-    outputs.extend(sig.outputs);
+    let mut new_outputs = Vec::new();
+    sig.outputs
+        .into_iter()
+        .for_each(|t_inner| resolve(t_inner, &mut new_outputs, &var_context, &multivar_context));
+
+    outputs.extend(new_outputs);
 
     Ok(())
 }
 
 fn instantiate(
-    stack: &mut Vec<Type>,
+    stack: &mut [Type],
     var_gen: &mut usize,
     multivar_gen: &mut usize,
     local_vars: &mut HashMap<usize, usize>,
@@ -333,7 +336,7 @@ fn resolve(
                 for v in var {
                     resolve(v, &mut resolved, var_context, multivar_context);
                 }
-                stack.extend(resolved.into_iter());
+                stack.extend(resolved);
             } else {
                 stack.push(t);
             }
@@ -462,33 +465,6 @@ fn unify_stack<'src>(
     multivar_context: &mut HashMap<usize, Box<[Type]>>,
 ) -> Result<(), CompileError<'src>> {
     match (a.split_last(), b.split_last()) {
-        (Some((Type::MultiVar(a_mv), a_rest)), _) => {
-            let len = a_rest.len();
-            if b.len() < len {
-                return Err(CompileError::CannotExecSignature {
-                    word,
-                    stack: stack_shot.to_vec(),
-                    sig: sig.clone(),
-                });
-            }
-
-            for (a_t, b_t) in a_rest.iter().zip(&b[..len]) {
-                unify(
-                    word,
-                    sig,
-                    stack_shot,
-                    a_t,
-                    b_t,
-                    var_context,
-                    multivar_context,
-                )?;
-            }
-
-            let tail = &b[len..];
-            multivar_context.insert(*a_mv, tail.to_vec().into_boxed_slice());
-
-            Ok(())
-        }
         (_, Some((Type::MultiVar(b_mv), b_rest))) => {
             let len = b_rest.len();
             if a.len() < len {
@@ -513,6 +489,33 @@ fn unify_stack<'src>(
 
             let tail = &a[len..];
             multivar_context.insert(*b_mv, tail.to_vec().into_boxed_slice());
+
+            Ok(())
+        }
+        (Some((Type::MultiVar(a_mv), a_rest)), _) => {
+            let len = a_rest.len();
+            if b.len() < len {
+                return Err(CompileError::CannotExecSignature {
+                    word,
+                    stack: stack_shot.to_vec(),
+                    sig: sig.clone(),
+                });
+            }
+
+            for (a_t, b_t) in a_rest.iter().zip(&b[..len]) {
+                unify(
+                    word,
+                    sig,
+                    stack_shot,
+                    a_t,
+                    b_t,
+                    var_context,
+                    multivar_context,
+                )?;
+            }
+
+            let tail = &b[len..];
+            multivar_context.insert(*a_mv, tail.to_vec().into_boxed_slice());
 
             Ok(())
         }
