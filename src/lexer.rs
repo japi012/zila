@@ -90,10 +90,7 @@ impl<'src> Lexer<'src> {
             }
         };
 
-        Some(Word {
-            token,
-            span: Span::new(start, end),
-        })
+        Some(Word::new(token, Span::new(start, end)))
     }
 }
 

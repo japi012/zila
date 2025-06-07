@@ -1,8 +1,6 @@
-use std::iter::Peekable;
-
 use crate::{
-    analyzer::{Item, ItemKind, Signature, Type},
-    lexer::{Span, Token, Word},
+    analyzer::{Item, ItemKind, Type},
+    lexer::Span,
 };
 
 impl Type {
@@ -94,7 +92,7 @@ fn escape(s: &str) -> Box<str> {
                 'n' => escaped.push('\n'),
                 '\\' => escaped.push('\\'),
                 '"' => escaped.push('\"'),
-                _ => ()
+                _ => (),
             }
         } else if c == '\\' {
             is_escaped = true;
@@ -102,7 +100,7 @@ fn escape(s: &str) -> Box<str> {
             escaped.push(c);
         }
     }
-    
+
     escaped.into_boxed_str()
 }
 
@@ -150,7 +148,7 @@ impl<'src> Compiler<'src> {
     fn compile_item_to_block(&mut self, item: Item<'src>, label: Label<'src>) {
         let (kind, span) = item.parts();
         match kind {
-            ItemKind::Quotation(sig, items) => {
+            ItemKind::Quotation(_, items) => {
                 let quotation_proc = self.new_proc(None);
 
                 for quotation_word in items {

@@ -37,8 +37,7 @@ fn compile(_path: &str, source: &str) -> Result<(), ()> {
     use lexer::Lexer;
 
     let words = Lexer::new(source).collect::<Vec<_>>();
-    let (signature, items) =
-        Analyzer::analyze(words.iter().copied()).map_err(|e| eprintln!("{e:?}"))?;
+    let (_, items) = Analyzer::analyze(words.iter().copied()).map_err(|e| eprintln!("{e:?}"))?;
 
     let (procs, string_literals) = Compiler::compile(items);
 

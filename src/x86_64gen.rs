@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     compiler::{Instruction, Label, Proc},
-    lexer::{Span, Word},
+    lexer::Span,
 };
 
 impl fmt::Display for Label<'_> {
@@ -104,16 +104,6 @@ impl<'src> Generator<'src> {
             writeln!(out, "    mov [rcx + {}], rax", i * 8)?;
         }
         writeln!(out, "    add rcx, {}", size * 8)?;
-        Ok(())
-    }
-
-    fn emit_copy_down(&self, out: &mut impl Write, offset: isize, size: usize) -> io::Result<()> {
-        writeln!(out, "    sub rcx, {}", size * 8)?;
-        for i in 0..size {
-            let byte_offset = offset + (i * 8) as isize;
-            writeln!(out, "    mov rax, [rcx + {byte_offset}]")?;
-            writeln!(out, "    mov [rcx + {}], rax", i * 8)?;
-        }
         Ok(())
     }
 
