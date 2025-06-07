@@ -14,6 +14,7 @@ impl Span {
 pub enum Token<'src> {
     Integer(isize),
     Symbol(&'src str),
+    String(&'src str),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -27,7 +28,7 @@ impl<'src> Word<'src> {
         Self { token, span }
     }
 
-    pub fn token(&self) -> Token {
+    pub fn token(&self) -> Token<'src> {
         self.token
     }
 
@@ -50,20 +51,43 @@ impl<'src> Lexer<'src> {
     }
 
     fn word(&mut self) -> Option<Word<'src>> {
-        let (start, _) = self.chars.find(|&(_, c)| !c.is_whitespace())?;
+        let (start, start_ch) = self.chars.find(|&(_, c)| !c.is_whitespace())?;
 
-        let end = self
-            .chars
-            .find(|&(_, c)| c.is_whitespace())
-            .map(|(i, _)| i)
-            .unwrap_or(self.source.len());
+        let (end, token) = match start_ch {
+            '"' => {
+                let mut escaped = false;
+                let mut end = start + 1;
 
-        let word = &self.source[start..end];
+                for (i, c) in self.chars.by_ref() {
+                    end = i;
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        break;
+                    }
+                }
 
-        let token = if !word.contains(|c: char| !c.is_ascii_digit()) {
-            Token::Integer(word.parse().unwrap())
-        } else {
-            Token::Symbol(word)
+                (end + 2, Token::String(&self.source[start..end + 2]))
+            }
+            _ => {
+                let end = self
+                    .chars
+                    .find(|&(_, c)| c.is_whitespace())
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.source.len());
+
+                let word = &self.source[start..end];
+
+                let token = if !word.contains(|c: char| !c.is_ascii_digit()) {
+                    Token::Integer(word.parse().unwrap())
+                } else {
+                    Token::Symbol(word)
+                };
+
+                (end, token)
+            }
         };
 
         Some(Word {

@@ -1,4 +1,7 @@
-use std::{fs::{self, File}, process::ExitCode};
+use std::{
+    fs::{self, File},
+    process::ExitCode,
+};
 
 mod analyzer;
 mod compiler;
@@ -29,16 +32,19 @@ fn main() -> ExitCode {
 }
 
 fn compile(_path: &str, source: &str) -> Result<(), ()> {
+    use analyzer::Analyzer;
     use compiler::Compiler;
     use lexer::Lexer;
 
     let words = Lexer::new(source).collect::<Vec<_>>();
-    analyzer::analyze(&words).map_err(|e| eprintln!("{e:?}"))?;
+    let (signature, items) =
+        Analyzer::analyze(words.iter().copied()).map_err(|e| eprintln!("{e:?}"))?;
 
-    let procs = Compiler::compile(&words);
+    let (procs, string_literals) = Compiler::compile(items);
 
     let mut file = File::create("output.asm").map_err(|e| eprintln!("{e}"))?;
-    x86_64gen::Generator::generate(&procs, &mut file).map_err(|e| eprintln!("{e}"))?;
+    x86_64gen::Generator::generate(&procs, &string_literals, &mut file)
+        .map_err(|e| eprintln!("{e}"))?;
 
     Ok(())
 }

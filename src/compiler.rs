@@ -1,9 +1,27 @@
-use crate::lexer::{Token, Word};
+use std::iter::Peekable;
+
+use crate::{
+    analyzer::{Item, ItemKind, Signature, Type},
+    lexer::{Span, Token, Word},
+};
+
+impl Type {
+    fn size(&self) -> Option<usize> {
+        match self {
+            Type::Var(_) | Type::MultiVar(_) => None,
+            Type::Bool => Some(1),
+            Type::Int => Some(1),
+            Type::Quotation(_) => Some(1),
+            Type::String => Some(2),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Instruction<'src> {
     PushInt(isize),
     PushBool(bool),
+    PushString(usize),
     PushQuote(Label<'src>),
 
     Add,
@@ -13,12 +31,14 @@ pub enum Instruction<'src> {
 
     Exit,
 
-    Dup,
-    Swap,
-    Drop,
-    Over,
+    Puts,
+
+    Dup { size: usize },
+    Swap { size_a: usize, size_b: usize },
+    Drop { size: usize },
+    Over { size_a: usize, size_b: usize },
     Apply,
-    Branch,
+    Branch { size: usize },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,7 +64,7 @@ impl<'src> Label<'src> {
 #[derive(Debug, Clone)]
 pub struct Proc<'src> {
     label: Label<'src>,
-    code: Vec<(Word<'src>, Instruction<'src>)>,
+    code: Vec<(Span, Instruction<'src>)>,
 }
 
 impl<'src> Proc<'src> {
@@ -59,48 +79,62 @@ impl<'src> Proc<'src> {
         self.label
     }
 
-    pub fn code(&self) -> &[(Word<'src>, Instruction<'src>)] {
+    pub fn code(&self) -> &[(Span, Instruction<'src>)] {
         &self.code
     }
 }
 
+fn escape(s: &str) -> Box<str> {
+    let mut escaped = String::new();
+
+    let mut is_escaped = false;
+    for c in s.chars() {
+        if is_escaped {
+            match c {
+                'n' => escaped.push('\n'),
+                '\\' => escaped.push('\\'),
+                '"' => escaped.push('\"'),
+                _ => ()
+            }
+        } else if c == '\\' {
+            is_escaped = true;
+        } else {
+            escaped.push(c);
+        }
+    }
+    
+    escaped.into_boxed_str()
+}
+
 pub struct Compiler<'src> {
-    words: &'src [Word<'src>],
-    pos: usize,
     procs: Vec<Proc<'src>>,
+    string_literals: Vec<Box<str>>,
 }
 
 impl<'src> Compiler<'src> {
-    pub fn new(words: &'src [Word<'src>]) -> Self {
+    pub fn new() -> Self {
         Self {
-            words,
-            pos: 0,
             procs: Vec::new(),
+            string_literals: Vec::new(),
         }
     }
 
-    pub fn compile(words: &'src [Word<'src>]) -> Vec<Proc<'src>> {
-        let mut compiler = Self::new(words);
+    pub fn compile<I: IntoIterator<Item = Item<'src>>>(
+        items: I,
+    ) -> (Vec<Proc<'src>>, Vec<Box<str>>) {
+        let mut items = items.into_iter().peekable();
+        let mut compiler = Self::new();
         let main_proc = compiler.new_proc(None);
 
-        while compiler.pos < words.len() {
-            compiler.compile_word_to_block(main_proc);
+        while let Some(item) = items.next() {
+            compiler.compile_item_to_block(item, main_proc);
         }
 
-        compiler.procs
-    }
-    
-    fn add_instruction(
-        &mut self,
-        label: Label<'src>,
-        instruction: Instruction<'src>,
-        word: Word<'src>,
-    ) {
-        self.procs[label.id].code.push((word, instruction))
+        (compiler.procs, compiler.string_literals)
     }
 
-    fn current_word(&self) -> Word<'src> {
-        self.words[self.pos]
+    fn add_instruction(&mut self, label: Label<'src>, instruction: Instruction<'src>, span: Span) {
+        self.procs[label.id].code.push((span, instruction))
     }
 
     fn new_proc(&mut self, name: Option<&'src str>) -> Label<'src> {
@@ -113,45 +147,97 @@ impl<'src> Compiler<'src> {
         label
     }
 
-    fn compile_word_to_block(&mut self, label: Label<'src>) {
-        let word = self.current_word();
-        self.pos += 1;
+    fn compile_item_to_block(&mut self, item: Item<'src>, label: Label<'src>) {
+        let (kind, span) = item.parts();
+        match kind {
+            ItemKind::Quotation(sig, items) => {
+                let quotation_proc = self.new_proc(None);
 
-        match word.token() {
-            Token::Symbol("[") => {
-                let quote_proc = self.new_proc(None);
-
-                while !matches!(self.current_word().token(), Token::Symbol("]")) {
-                    self.compile_word_to_block(quote_proc);
+                for quotation_word in items {
+                    self.compile_item_to_block(quotation_word, quotation_proc);
                 }
-                self.pos += 1;
 
-                self.add_instruction(label, Instruction::PushQuote(quote_proc), word);
+                self.add_instruction(label, Instruction::PushQuote(quotation_proc), span);
             }
 
-            Token::Integer(i) => self.add_instruction(label, Instruction::PushInt(i), word),
-
-            Token::Symbol("true") => self.add_instruction(label, Instruction::PushBool(true), word),
-            Token::Symbol("false") => {
-                self.add_instruction(label, Instruction::PushBool(false), word)
+            ItemKind::Integer(i) => self.add_instruction(label, Instruction::PushInt(i), span),
+            ItemKind::String(s) => {
+                let string_id = self.string_literals.len();
+                self.string_literals.push(escape(&s[1..s.len() - 2]));
+                self.add_instruction(label, Instruction::PushString(string_id), span)
             }
 
-            Token::Symbol("+") => self.add_instruction(label, Instruction::Add, word),
-            Token::Symbol("-") => self.add_instruction(label, Instruction::Sub, word),
-            Token::Symbol("*") => self.add_instruction(label, Instruction::Mul, word),
-            Token::Symbol("/") => self.add_instruction(label, Instruction::Div, word),
+            ItemKind::Word(_, "true") => {
+                self.add_instruction(label, Instruction::PushBool(true), span)
+            }
+            ItemKind::Word(_, "false") => {
+                self.add_instruction(label, Instruction::PushBool(false), span)
+            }
 
-            Token::Symbol("exit") => self.add_instruction(label, Instruction::Exit, word),
+            ItemKind::Word(_, "+") => self.add_instruction(label, Instruction::Add, span),
+            ItemKind::Word(_, "-") => self.add_instruction(label, Instruction::Sub, span),
+            ItemKind::Word(_, "*") => self.add_instruction(label, Instruction::Mul, span),
+            ItemKind::Word(_, "/") => self.add_instruction(label, Instruction::Div, span),
 
-            Token::Symbol("dup") => self.add_instruction(label, Instruction::Dup, word),
-            Token::Symbol("drop") => self.add_instruction(label, Instruction::Drop, word),
-            Token::Symbol("swap") => self.add_instruction(label, Instruction::Swap, word),
-            Token::Symbol("over") => self.add_instruction(label, Instruction::Over, word),
+            ItemKind::Word(_, "exit") => self.add_instruction(label, Instruction::Exit, span),
 
-            Token::Symbol("apply") => self.add_instruction(label, Instruction::Apply, word),
-            Token::Symbol("?") => self.add_instruction(label, Instruction::Branch, word),
+            ItemKind::Word(_, "puts") => self.add_instruction(label, Instruction::Puts, span),
 
-            Token::Symbol(s) => todo!("user defined words: {s}"),
+            ItemKind::Word(sig, "dup") => {
+                let (inputs, _) = sig.parts();
+                self.add_instruction(
+                    label,
+                    Instruction::Dup {
+                        size: inputs[0].size().unwrap(),
+                    },
+                    span,
+                )
+            }
+            ItemKind::Word(sig, "drop") => {
+                let (inputs, _) = sig.parts();
+                self.add_instruction(
+                    label,
+                    Instruction::Drop {
+                        size: inputs[0].size().unwrap(),
+                    },
+                    span,
+                )
+            }
+            ItemKind::Word(sig, "swap") => {
+                let (inputs, _) = sig.parts();
+                self.add_instruction(
+                    label,
+                    Instruction::Swap {
+                        size_a: inputs[0].size().unwrap(),
+                        size_b: inputs[1].size().unwrap(),
+                    },
+                    span,
+                )
+            }
+            ItemKind::Word(sig, "over") => {
+                let (inputs, _) = sig.parts();
+                self.add_instruction(
+                    label,
+                    Instruction::Over {
+                        size_a: inputs[0].size().unwrap(),
+                        size_b: inputs[1].size().unwrap(),
+                    },
+                    span,
+                )
+            }
+            ItemKind::Word(_, "apply") => self.add_instruction(label, Instruction::Apply, span),
+            ItemKind::Word(sig, "?") => {
+                let (inputs, _) = sig.parts();
+                self.add_instruction(
+                    label,
+                    Instruction::Branch {
+                        size: inputs[0].size().unwrap(),
+                    },
+                    span,
+                )
+            }
+
+            ItemKind::Word(_, s) => todo!("user defined words: {s}"),
         }
     }
 }

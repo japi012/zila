@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     compiler::{Instruction, Label, Proc},
-    lexer::Word,
+    lexer::{Span, Word},
 };
 
 impl fmt::Display for Label<'_> {
@@ -19,15 +19,23 @@ impl fmt::Display for Label<'_> {
 
 pub struct Generator<'src> {
     procs: &'src [Proc<'src>],
+    string_literals: &'src [Box<str>],
 }
 
 impl<'src> Generator<'src> {
-    pub fn new(procs: &'src [Proc<'src>]) -> Self {
-        Self { procs }
+    pub fn new(procs: &'src [Proc<'src>], string_literals: &'src [Box<str>]) -> Self {
+        Self {
+            procs,
+            string_literals,
+        }
     }
 
-    pub fn generate(procs: &'src [Proc<'src>], out: &mut impl Write) -> io::Result<()> {
-        let generator = Self::new(procs);
+    pub fn generate(
+        procs: &'src [Proc<'src>],
+        string_literals: &'src [Box<str>],
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        let generator = Self::new(procs, string_literals);
 
         generator.gen_header(out)?;
         for proc in procs {
@@ -45,6 +53,21 @@ impl<'src> Generator<'src> {
         writeln!(out, "section .bss")?;
         writeln!(out, "align 8")?;
         writeln!(out, "data_stack: resq 1024")?;
+        writeln!(out, "struct_stack: resq 1024")?;
+
+        writeln!(out, "section .rodata")?;
+
+        for (i, string_literal) in self.string_literals.iter().enumerate() {
+            write!(out, "str_{i}: db ")?;
+            let bytes = string_literal.as_bytes();
+            for (l, byte) in bytes.iter().enumerate() {
+                write!(out, "{byte}")?;
+                if l < bytes.len() - 1 {
+                    write!(out, ",")?;
+                }
+            }
+            writeln!(out)?;
+        }
 
         writeln!(out, "section .text")?;
         writeln!(out, "global _start")?;
@@ -64,8 +87,8 @@ impl<'src> Generator<'src> {
 
         let proc = self.get_proc(label);
 
-        for &(word, instruction) in proc.code() {
-            self.gen_instruction(word, instruction, out)?;
+        for &(span, instruction) in proc.code() {
+            self.gen_instruction(span, instruction, out)?;
         }
 
         writeln!(out, "    ; RETURN")?;
@@ -74,20 +97,45 @@ impl<'src> Generator<'src> {
         Ok(())
     }
 
+    fn emit_copy_up(&self, out: &mut impl Write, offset: isize, size: usize) -> io::Result<()> {
+        for i in 0..size {
+            let byte_offset = offset - (8 * (size - i) as isize);
+            writeln!(out, "    mov rax, [rcx + {byte_offset}]")?;
+            writeln!(out, "    mov [rcx + {}], rax", i * 8)?;
+        }
+        writeln!(out, "    add rcx, {}", size * 8)?;
+        Ok(())
+    }
+
+    fn emit_copy_down(&self, out: &mut impl Write, offset: isize, size: usize) -> io::Result<()> {
+        writeln!(out, "    sub rcx, {}", size * 8)?;
+        for i in 0..size {
+            let byte_offset = offset + (i * 8) as isize;
+            writeln!(out, "    mov rax, [rcx + {byte_offset}]")?;
+            writeln!(out, "    mov [rcx + {}], rax", i * 8)?;
+        }
+        Ok(())
+    }
+
+    fn emit_drop(&self, out: &mut impl Write, size: usize) -> io::Result<()> {
+        writeln!(out, "    sub rcx, {}", size * 8)?;
+        Ok(())
+    }
+
     fn gen_instruction(
         &self,
-        word: Word<'src>,
+        span: Span,
         instruction: Instruction,
         out: &mut impl Write,
     ) -> io::Result<()> {
         match instruction {
             Instruction::PushInt(i) => {
-                writeln!(out, "    ; {:?} -- PUSHINT", word.span())?;
+                writeln!(out, "    ; {:?} -- PUSHINT", span)?;
                 writeln!(out, "    mov qword [rcx], {i}")?;
                 writeln!(out, "    add rcx, 8")?;
             }
             Instruction::PushBool(b) => {
-                writeln!(out, "    ; {:?} -- PUSHBOOL", word.span())?;
+                writeln!(out, "    ; {:?} -- PUSHBOOL", span)?;
                 writeln!(
                     out,
                     "    mov qword [rcx], {}",
@@ -95,79 +143,125 @@ impl<'src> Generator<'src> {
                 )?;
                 writeln!(out, "    add rcx, 8")?;
             }
+            Instruction::PushString(i) => {
+                writeln!(out, "    ; {:?} -- PUSHSTRING", span)?;
+                writeln!(out, "    lea rax, [rel str_{i}]")?;
+                writeln!(out, "    mov [rcx], rax")?;
+                writeln!(out, "    mov rax, {}", self.string_literals[i].len())?;
+                writeln!(out, "    mov [rcx + 8], rax")?;
+                writeln!(out, "    add rcx, 16")?;
+            }
             Instruction::PushQuote(q) => {
-                writeln!(out, "    ; {:?} -- PUSHQUOTE", word.span())?;
+                writeln!(out, "    ; {:?} -- PUSHQUOTE", span)?;
                 writeln!(out, "    mov qword [rcx], {q}")?;
                 writeln!(out, "    add rcx, 8")?;
             }
 
             Instruction::Apply => {
-                writeln!(out, "    ; {:?} -- APPLY", word.span())?;
+                writeln!(out, "    ; {:?} -- APPLY", span)?;
                 writeln!(out, "    sub rcx, 8")?;
                 writeln!(out, "    call [rcx]")?;
             }
-            Instruction::Branch => {
-                writeln!(out, "    ; {:?} -- BRANCH", word.span())?;
-                writeln!(out, "    mov rax, [rcx - 24]")?;
-                writeln!(out, "    not rax")?;
-                writeln!(out, "    mov rdx, [rcx - 16]")?;
-                writeln!(out, "    mov rbx, [rcx - 8]")?;
-                writeln!(out, "    and rdx, [rcx - 24]")?;
-                writeln!(out, "    and rbx, rax")?;
-                writeln!(out, "    or rdx, rbx")?;
-                writeln!(out, "    mov [rcx - 24], rdx")?;
-                writeln!(out, "    sub rcx, 16")?;
-                writeln!(out, "    mov rax, [rcx - 24]")?;
+            Instruction::Branch { size } => {
+                writeln!(out, "    ; {:?} -- BRANCH", span)?;
+
+                let cond_off = -8 * (2 * size as isize + 1);
+                let true_off_start = -8 * (size as isize + 1);
+                let false_off_start = -8 * 1;
+                let result_off_start = cond_off;
+
+                writeln!(out, "    mov rax, [rcx - {}]", -cond_off)?;
+                writeln!(out, "    mov rbx, rax")?;
+                writeln!(out, "    not rbx")?;
+
+                for i in 0..size {
+                    let true_i = true_off_start - 8 * i as isize;
+                    let false_i = false_off_start - 8 * i as isize;
+                    let res_i = result_off_start - 8 * i as isize;
+
+                    writeln!(out, "    mov rdx, [rcx - {}]", -true_i)?;
+                    writeln!(out, "    and rdx, rax")?;
+
+                    writeln!(out, "    mov rsi, [rcx - {}]", -false_i)?;
+                    writeln!(out, "    and rsi, rbx")?;
+
+                    writeln!(out, "    or rdx, rsi")?;
+                    writeln!(out, "    mov [rcx - {}], rdx", -res_i)?;
+                }
+
+                writeln!(out, "    sub rcx, {}", 16 * size)?;
             }
+
             Instruction::Exit => {
-                writeln!(out, "    ; {:?} -- EXIT", word.span())?;
+                writeln!(out, "    ; {:?} -- EXIT", span)?;
                 writeln!(out, "    mov rax, 60")?;
                 writeln!(out, "    mov rdi, [rcx - 8]")?;
                 writeln!(out, "    syscall")?;
             }
 
+            Instruction::Puts => {
+                writeln!(out, "    ; {:?} -- PUTS", span)?;
+                writeln!(out, "    mov rdi, 1")?;
+                writeln!(out, "    mov rsi, [rcx - 16]")?;
+                writeln!(out, "    mov rdx, [rcx - 8]")?;
+                writeln!(out, "    mov rax, 1")?;
+                writeln!(out, "    syscall")?;
+                writeln!(out, "    sub rcx, 16")?;
+            }
+
             Instruction::Add => {
-                writeln!(out, "    ; {:?} -- ADD", word.span())?;
+                writeln!(out, "    ; {:?} -- ADD", span)?;
                 writeln!(out, "    mov rax, [rcx - 8]")?;
                 writeln!(out, "    add [rcx - 16], rax")?;
                 writeln!(out, "    sub rcx, 8")?;
             }
             Instruction::Sub => {
-                writeln!(out, "    ; {:?} -- SUB", word.span())?;
+                writeln!(out, "    ; {:?} -- SUB", span)?;
                 writeln!(out, "    mov rax, [rcx - 8]")?;
                 writeln!(out, "    sub [rcx - 16], rax")?;
                 writeln!(out, "    sub rcx, 8")?;
             }
             Instruction::Mul => {
-                writeln!(out, "    ; {:?} -- MUL", word.span())?;
+                writeln!(out, "    ; {:?} -- MUL", span)?;
                 writeln!(out, "    mov rax, [rcx - 8]")?;
                 writeln!(out, "    imul [rcx - 16], rax")?;
                 writeln!(out, "    sub rcx, 8")?;
             }
             Instruction::Div => todo!(),
 
-            Instruction::Dup => {
-                writeln!(out, "    ; {:?} -- DUP", word.span())?;
-                writeln!(out, "    mov rax, [rcx - 8]")?;
-                writeln!(out, "    mov [rcx], rax")?;
-                writeln!(out, "    add rcx, 8")?;
+            Instruction::Dup { size } => {
+                writeln!(out, "    ; {:?} -- DUP", span)?;
+                self.emit_copy_up(out, -(size as isize * 8), size)?;
             }
-            Instruction::Over => {
-                writeln!(out, "    ; {:?} -- OVER", word.span())?;
-                writeln!(out, "    mov rax, [rcx - 16]")?;
-                writeln!(out, "    mov [rcx], rax")?;
-                writeln!(out, "    add rcx, 8")?;
+
+            Instruction::Over { size_a, size_b } => {
+                writeln!(out, "    ; {:?} -- OVER", span)?;
+                let offset = -((size_a + size_b) as isize * 8);
+                self.emit_copy_up(out, offset, size_a)?;
             }
-            Instruction::Drop => {
-                writeln!(out, "    ; {:?} -- DROP", word.span())?;
-                writeln!(out, "    sub rcx, 8")?;
+
+            Instruction::Drop { size } => {
+                writeln!(out, "    ; {:?} -- DROP", span)?;
+                self.emit_drop(out, size)?;
             }
-            Instruction::Swap => {
-                writeln!(out, "    ; {:?} -- SWAP", word.span())?;
-                writeln!(out, "    mov rax, [rcx - 8]")?;
-                writeln!(out, "    mov rdx, [rcx - 16]")?;
-                writeln!(out, "    mov [rcx - 8], rdx")?;
-                writeln!(out, "    mov [rcx - 16], rax")?;
+            Instruction::Swap { size_a, size_b } => {
+                writeln!(out, "    ; {:?} -- SWAP", span)?;
+
+                let sa = size_a * 8;
+                let sb = size_b * 8;
+
+                for i in 0..size_a {
+                    writeln!(out, "    mov rax, [rcx - {}]", 8 * (i + 1))?;
+                    writeln!(out, "    mov [rsp - {}], rax", 8 * (i + 1))?;
+                }
+                for i in 0..size_b {
+                    writeln!(out, "    mov rax, [rcx - {}]", sa + 8 * (i + 1))?;
+                    writeln!(out, "    mov [rcx - {}], rax", 8 * (i + 1))?;
+                }
+                for i in 0..size_a {
+                    writeln!(out, "    mov rax, [rsp - {}]", 8 * (i + 1))?;
+                    writeln!(out, "    mov [rcx - {}], rax", sb + 8 * (i + 1))?;
+                }
             }
         }
 
