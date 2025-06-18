@@ -69,20 +69,23 @@ impl<'src> Lexer<'src> {
         let (end, token) = match start_ch {
             '"' => {
                 let mut escaped = false;
-                let mut end = start + 1;
+                let mut end = start;
 
-                for (i, c) in self.chars.by_ref() {
-                    end = i;
+                for (_, c) in self.chars.by_ref() {
                     if escaped {
+                        end += 1;
                         escaped = false;
                     } else if c == '\\' {
+                        end += 1;
                         escaped = true;
                     } else if c == '"' {
                         break;
                     }
+                    end += 1;
                 }
 
-                (end + 2, Token::String(&self.source[start..end + 2]))
+                let end = (end + 2).min(self.source.len());
+                (end, Token::String(&self.source[start..end]))
             }
             _ => {
                 let end = self

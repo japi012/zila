@@ -188,7 +188,7 @@ impl<'src> Compiler<'src> {
             ItemKind::Integer(i) => self.add_instruction(label, Instruction::PushInt(i), span),
             ItemKind::String(s) => {
                 let string_id = self.string_literals.len();
-                self.string_literals.push(escape(&s[1..s.len() - 2]));
+                self.string_literals.push(escape(&s[1..s.len() - 1]));
                 self.add_instruction(label, Instruction::PushString(string_id), span)
             }
 
