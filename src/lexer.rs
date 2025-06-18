@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Span {
     start: usize,
@@ -7,6 +9,10 @@ pub struct Span {
 impl Span {
     fn new(start: usize, end: usize) -> Self {
         Self { start, end }
+    }
+
+    pub fn parts(&self) -> (usize, usize) {
+        (self.start, self.end)
     }
 }
 
@@ -34,6 +40,13 @@ impl<'src> Word<'src> {
 
     pub fn span(&self) -> Span {
         self.span
+    }
+
+    pub fn word(&self) -> &'src str {
+        let Token::Symbol(word) = self.token() else {
+            unreachable!();
+        };
+        word
     }
 }
 

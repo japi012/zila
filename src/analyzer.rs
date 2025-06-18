@@ -1,17 +1,98 @@
-use std::{collections::HashMap, iter::Peekable};
+use std::{
+    collections::HashMap,
+    fmt,
+    io::{self, Write},
+    iter::Peekable,
+    path::Path,
+};
 
 use crate::lexer::{Span, Token, Word};
 
 #[derive(Debug, Clone)]
 pub enum CompileError<'src> {
     UndefinedWord {
-        word: Word<'src>,
+        symbol: &'src str,
+        span: Span,
     },
     CannotExecSignature {
-        word: Word<'src>,
+        word: &'src str,
+        word_span: Span,
         stack: Vec<Type>,
         sig: Signature,
     },
+    Expected {
+        found: Option<Word<'src>>,
+        reason: &'static str,
+    },
+}
+
+fn get_line_col(source: &str, index: usize) -> (usize, usize) {
+    source
+        .chars()
+        .take(index)
+        .fold((1, 1), |(line, column), ch| match ch {
+            '\n' => (line + 1, 1),
+            _ => (line, column + 1),
+        })
+}
+
+pub fn report_error(
+    err: CompileError,
+    path: &Path,
+    source: &str,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    let ((start, end), reason, note) = match err {
+        CompileError::UndefinedWord { symbol, span } => {
+            (span.parts(), format!("undefined word `{symbol}`"), None)
+        }
+        CompileError::Expected { found, reason } => (
+            found
+                .map(|word| word.span().parts())
+                .unwrap_or_else(|| get_line_col(source, source.len())),
+            reason.into(),
+            None,
+        ),
+        CompileError::CannotExecSignature {
+            word,
+            word_span,
+            stack,
+            sig,
+        } => (
+            word_span.parts(),
+            format!("cannot execute word `{word}`"),
+            Some(format!(
+                "stack state:\n    {}\n\nsignature of `{word}`:\n    {}",
+                stack
+                    .iter()
+                    .map(|ty| ty.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                sig
+            )),
+        ),
+    };
+
+    let (ln, col) = get_line_col(source, start);
+    let source_ln = source.lines().nth(ln - 1).unwrap_or_default();
+
+    writeln!(out, "ERROR: {reason}")?;
+    writeln!(out, " --> {}:{ln}:{col}", path.display())?;
+    writeln!(out, "  {source_ln}")?;
+    writeln!(out, "  {}{}", " ".repeat(col - 1), "^".repeat(end - start))?;
+
+    if let Some(note) = note {
+        writeln!(out)?;
+        for note_ln in note.lines() {
+            if note_ln.is_empty() {
+                writeln!(out)?;
+            } else {
+                writeln!(out, "NOTE: {note_ln}")?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +103,60 @@ pub enum Type {
     Var(usize),
     MultiVar(usize),
     Quotation(Signature),
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Int => write!(f, "int"),
+            Type::Bool => write!(f, "bool"),
+            Type::String => write!(f, "string"),
+            Type::Var(v) => write!(f, "'{v}"),
+            Type::MultiVar(v) => write!(f, "..{v}"),
+            Type::Quotation(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Signature {
+    inputs: Vec<Type>,
+    outputs: Vec<Type>,
+}
+
+impl fmt::Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "( ")?;
+        for input in &self.inputs {
+            write!(f, "{input} ")?;
+        }
+        write!(f, "-- ")?;
+        for output in &self.outputs {
+            write!(f, "{output} ")?;
+        }
+        write!(f, ")")?;
+        Ok(())
+    }
+}
+
+impl Signature {
+    fn new(inputs: Vec<Type>, outputs: Vec<Type>) -> Self {
+        Self { inputs, outputs }
+    }
+
+    pub fn parts(self) -> (Vec<Type>, Vec<Type>) {
+        (self.inputs, self.outputs)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Def<'src> {
+    WordDef {
+        name: &'src str,
+        name_span: Span,
+        ty: Signature,
+        body: Vec<Item<'src>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -45,30 +180,6 @@ impl<'src> Item<'src> {
 
     pub fn parts(self) -> (ItemKind<'src>, Span) {
         (self.kind, self.span)
-    }
-
-    pub fn kind(&self) -> &ItemKind<'src> {
-        &self.kind
-    }
-
-    pub fn span(&self) -> Span {
-        self.span
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Signature {
-    inputs: Vec<Type>,
-    outputs: Vec<Type>,
-}
-
-impl Signature {
-    fn new(inputs: Vec<Type>, outputs: Vec<Type>) -> Self {
-        Self { inputs, outputs }
-    }
-
-    pub fn parts(self) -> (Vec<Type>, Vec<Type>) {
-        (self.inputs, self.outputs)
     }
 }
 
@@ -302,7 +413,8 @@ impl<'src> State<'src> {
                 self.unify_signature(word, sig, a_sig, b_sig, stack_shot, context)
             }
             _ => Err(CompileError::CannotExecSignature {
-                word,
+                word: word.word(),
+                word_span: word.span(),
                 stack: stack_shot.to_vec(),
                 sig: sig.clone(),
             }),
@@ -336,7 +448,8 @@ impl<'src> State<'src> {
                 let len = b_rest.len();
                 if a.len() < len {
                     return Err(CompileError::CannotExecSignature {
-                        word,
+                        word: word.word(),
+                        word_span: word.span(),
                         stack: stack_shot.to_vec(),
                         sig: sig.clone(),
                     });
@@ -355,7 +468,8 @@ impl<'src> State<'src> {
                 let len = a_rest.len();
                 if b.len() < len {
                     return Err(CompileError::CannotExecSignature {
-                        word,
+                        word: word.word(),
+                        word_span: word.span(),
                         stack: stack_shot.to_vec(),
                         sig: sig.clone(),
                     });
@@ -373,7 +487,8 @@ impl<'src> State<'src> {
             _ => {
                 if a.len() != b.len() {
                     return Err(CompileError::CannotExecSignature {
-                        word,
+                        word: word.word(),
+                        word_span: word.span(),
                         stack: stack_shot.to_vec(),
                         sig: sig.clone(),
                     });
@@ -450,19 +565,81 @@ impl<'src, W: Iterator<Item = Word<'src>>> Analyzer<'src, W> {
             .insert("?", S::new(vec![Var(0), Var(0), Bool], vec![Var(0)]));
     }
 
-    pub fn analyze(words: W) -> Result<(Signature, Box<[Item<'src>]>), CompileError<'src>> {
+    pub fn analyze(words: W) -> Result<Vec<Def<'src>>, CompileError<'src>> {
         let mut analyzer = Self::new(words);
-        let mut state = State::new();
-        let mut context = Context::new();
         analyzer.register_builtins();
 
+        let mut defs = Vec::new();
+
         while analyzer.words.peek().is_some() {
-            analyzer.check_word(&mut state, &mut context)?;
+            defs.push(analyzer.check_def()?);
         }
 
-        let (signature, word_types) = state.resolve_all(&context);
+        Ok(defs)
+    }
 
-        Ok((signature, word_types.into_boxed_slice()))
+    fn expect<F: FnOnce(Token<'src>) -> bool>(
+        &mut self,
+        valid: F,
+        reason: &'static str,
+    ) -> Result<Word<'src>, CompileError<'src>> {
+        let Some(found) = self.words.next() else {
+            return Err(CompileError::Expected {
+                found: None,
+                reason,
+            });
+        };
+
+        if valid(found.token()) {
+            Ok(found)
+        } else {
+            Err(CompileError::Expected {
+                found: Some(found),
+                reason,
+            })
+        }
+    }
+
+    fn check_def(&mut self) -> Result<Def<'src>, CompileError<'src>> {
+        self.expect(
+            |t| matches!(t, Token::Symbol(":")),
+            "expected colon at start of definition",
+        )?;
+
+        let name = self.expect(
+            |t| matches!(t, Token::Symbol(_)),
+            "expected name of definition",
+        )?;
+
+        let name_span = name.span();
+        let Token::Symbol(name) = name.token() else {
+            unreachable!();
+        };
+
+        let mut state = State::new();
+        let mut context = Context::new();
+
+        while self
+            .words
+            .peek()
+            .is_some_and(|word| !matches!(word.token(), Token::Symbol(";")))
+        {
+            self.check_word(&mut state, &mut context)?;
+        }
+
+        let _ = self.expect(
+            |t| matches!(t, Token::Symbol(";")),
+            "expected `;` to end definition",
+        )?;
+
+        let (ty, body) = state.resolve_all(&context);
+        self.word_bindings.insert(name, ty.clone());
+        Ok(Def::WordDef {
+            name,
+            name_span,
+            ty,
+            body,
+        })
     }
 
     fn check_word(
@@ -503,7 +680,10 @@ impl<'src, W: Iterator<Item = Word<'src>>> Analyzer<'src, W> {
                 }
                 Token::Symbol(sym) => {
                     let Some(signature) = self.word_bindings.get(sym) else {
-                        return Err(CompileError::UndefinedWord { word });
+                        return Err(CompileError::UndefinedWord {
+                            symbol: sym,
+                            span: word.span(),
+                        });
                     };
 
                     let mut signature = signature.clone();

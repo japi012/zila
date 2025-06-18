@@ -11,10 +11,14 @@ use crate::{
 impl fmt::Display for Label<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.name() {
-            Some(name) => write!(f, "proc_{}_{name}", self.id()),
+            Some(name) => write!(f, "proc_{}_{}", self.id(), sanitize(name)),
             None => write!(f, "proc_{}", self.id()),
         }
     }
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
 }
 
 pub struct Generator<'src> {
@@ -31,13 +35,14 @@ impl<'src> Generator<'src> {
     }
 
     pub fn generate(
+        main_proc: Label,
         procs: &'src [Proc<'src>],
         string_literals: &'src [Box<str>],
         out: &mut impl Write,
     ) -> io::Result<()> {
         let generator = Self::new(procs, string_literals);
 
-        generator.gen_header(out)?;
+        generator.gen_header(main_proc, out)?;
         for proc in procs {
             generator.gen_proc(proc.label(), out)?;
         }
@@ -49,11 +54,10 @@ impl<'src> Generator<'src> {
         &self.procs[label.id()]
     }
 
-    fn gen_header(&self, out: &mut impl Write) -> io::Result<()> {
+    fn gen_header(&self, main_proc: Label, out: &mut impl Write) -> io::Result<()> {
         writeln!(out, "section .bss")?;
         writeln!(out, "align 8")?;
         writeln!(out, "data_stack: resq 1024")?;
-        writeln!(out, "struct_stack: resq 1024")?;
 
         writeln!(out, "section .rodata")?;
 
@@ -74,7 +78,7 @@ impl<'src> Generator<'src> {
 
         writeln!(out, "_start:")?;
         writeln!(out, "    lea rcx, [rel data_stack]")?;
-        writeln!(out, "    call proc_0")?;
+        writeln!(out, "    call {main_proc}")?;
         writeln!(out, "    mov rax, 60")?;
         writeln!(out, "    xor rdi, rdi")?;
         writeln!(out, "    syscall")?;
@@ -137,8 +141,11 @@ impl<'src> Generator<'src> {
                 writeln!(out, "    ; {:?} -- PUSHSTRING", span)?;
                 writeln!(out, "    lea rax, [rel str_{i}]")?;
                 writeln!(out, "    mov [rcx], rax")?;
-                writeln!(out, "    mov rax, {}", self.string_literals[i].len())?;
-                writeln!(out, "    mov [rcx + 8], rax")?;
+                writeln!(
+                    out,
+                    "    mov qword [rcx + 8], {}",
+                    self.string_literals[i].len()
+                )?;
                 writeln!(out, "    add rcx, 16")?;
             }
             Instruction::PushQuote(q) => {
@@ -151,6 +158,10 @@ impl<'src> Generator<'src> {
                 writeln!(out, "    ; {:?} -- APPLY", span)?;
                 writeln!(out, "    sub rcx, 8")?;
                 writeln!(out, "    call [rcx]")?;
+            }
+            Instruction::Call(proc) => {
+                writeln!(out, "    ; {:?} -- CALL", span)?;
+                writeln!(out, "    call {proc}")?;
             }
             Instruction::Branch { size } => {
                 writeln!(out, "    ; {:?} -- BRANCH", span)?;
@@ -191,11 +202,13 @@ impl<'src> Generator<'src> {
 
             Instruction::Puts => {
                 writeln!(out, "    ; {:?} -- PUTS", span)?;
+                writeln!(out, "    push rcx")?;
                 writeln!(out, "    mov rdi, 1")?;
                 writeln!(out, "    mov rsi, [rcx - 16]")?;
                 writeln!(out, "    mov rdx, [rcx - 8]")?;
                 writeln!(out, "    mov rax, 1")?;
                 writeln!(out, "    syscall")?;
+                writeln!(out, "    pop rcx")?;
                 writeln!(out, "    sub rcx, 16")?;
             }
 

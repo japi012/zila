@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use crate::{
-    analyzer::{Item, ItemKind, Type},
+    analyzer::{Def, Item, ItemKind, Type},
     lexer::Span,
 };
 
@@ -37,6 +39,8 @@ pub enum Instruction<'src> {
     Over { size_a: usize, size_b: usize },
     Apply,
     Branch { size: usize },
+
+    Call(Label<'src>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,6 +111,7 @@ fn escape(s: &str) -> Box<str> {
 pub struct Compiler<'src> {
     procs: Vec<Proc<'src>>,
     string_literals: Vec<Box<str>>,
+    defs: HashMap<&'src str, Label<'src>>,
 }
 
 impl<'src> Compiler<'src> {
@@ -114,21 +119,43 @@ impl<'src> Compiler<'src> {
         Self {
             procs: Vec::new(),
             string_literals: Vec::new(),
+            defs: HashMap::new(),
         }
     }
 
-    pub fn compile<I: IntoIterator<Item = Item<'src>>>(
-        items: I,
-    ) -> (Vec<Proc<'src>>, Vec<Box<str>>) {
-        let mut items = items.into_iter().peekable();
+    pub fn compile(defs: Vec<Def<'src>>) -> (Option<Label<'src>>, Vec<Proc<'src>>, Vec<Box<str>>) {
         let mut compiler = Self::new();
-        let main_proc = compiler.new_proc(None);
 
-        while let Some(item) = items.next() {
-            compiler.compile_item_to_block(item, main_proc);
+        for def in &defs {
+            match def {
+                Def::WordDef { name, .. } => {
+                    let label = compiler.new_proc(Some(name));
+                    compiler.defs.insert(name, label);
+                }
+            }
         }
 
-        (compiler.procs, compiler.string_literals)
+        for def in defs {
+            compiler.compile_def(def);
+        }
+
+        (
+            compiler.defs.get("main").copied(),
+            compiler.procs,
+            compiler.string_literals,
+        )
+    }
+
+    fn compile_def(&mut self, def: Def<'src>) {
+        match def {
+            Def::WordDef { name, body, .. } => {
+                let label = self.defs[name];
+                let mut body = body.into_iter();
+                while let Some(item) = body.next() {
+                    self.compile_item_to_block(item, label);
+                }
+            }
+        }
     }
 
     fn add_instruction(&mut self, label: Label<'src>, instruction: Instruction<'src>, span: Span) {
@@ -189,7 +216,7 @@ impl<'src> Compiler<'src> {
                         size: inputs[0].size().unwrap(),
                     },
                     span,
-                )
+                );
             }
             ItemKind::Word(sig, "drop") => {
                 let (inputs, _) = sig.parts();
@@ -199,7 +226,7 @@ impl<'src> Compiler<'src> {
                         size: inputs[0].size().unwrap(),
                     },
                     span,
-                )
+                );
             }
             ItemKind::Word(sig, "swap") => {
                 let (inputs, _) = sig.parts();
@@ -210,7 +237,7 @@ impl<'src> Compiler<'src> {
                         size_b: inputs[1].size().unwrap(),
                     },
                     span,
-                )
+                );
             }
             ItemKind::Word(sig, "over") => {
                 let (inputs, _) = sig.parts();
@@ -221,7 +248,7 @@ impl<'src> Compiler<'src> {
                         size_b: inputs[1].size().unwrap(),
                     },
                     span,
-                )
+                );
             }
             ItemKind::Word(_, "apply") => self.add_instruction(label, Instruction::Apply, span),
             ItemKind::Word(sig, "?") => {
@@ -232,10 +259,16 @@ impl<'src> Compiler<'src> {
                         size: inputs[0].size().unwrap(),
                     },
                     span,
-                )
+                );
             }
 
-            ItemKind::Word(_, s) => todo!("user defined words: {s}"),
+            ItemKind::Word(_, s) => {
+                let Some(&proc) = self.defs.get(s) else {
+                    todo!("error: undefined word `{s}`");
+                };
+
+                self.add_instruction(label, Instruction::Call(proc), span);
+            }
         }
     }
 }
