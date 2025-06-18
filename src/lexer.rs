@@ -73,10 +73,8 @@ impl<'src> Lexer<'src> {
 
                 for (_, c) in self.chars.by_ref() {
                     if escaped {
-                        end += 1;
                         escaped = false;
                     } else if c == '\\' {
-                        end += 1;
                         escaped = true;
                     } else if c == '"' {
                         break;
