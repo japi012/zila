@@ -127,7 +127,7 @@ pub struct Signature {
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "( ")?;
-        for input in &self.inputs {
+        for input in self.inputs.iter().rev() {
             write!(f, "{input} ")?;
         }
         write!(f, "-- ")?;
